@@ -22,6 +22,24 @@
         .offline { background: #ef4444; box-shadow: 0 0 8px #ef4444; }
         .checking { background: #f59e0b; box-shadow: 0 0 8px #f59e0b; }
         @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+        #apps {
+            display: block;
+        }
+
+        .group {
+            margin-bottom: 16px;
+        }
+
+        .group .apps {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .app {
+            width: 152px;
+            flex-shrink: 0;
+        }
     </style>
 </head>
 <body>
@@ -45,17 +63,37 @@
 
 <script>
 /* ================= 配置与存储 ================= */
-const appList = [
-    { name: "1Panel", protocol: "http", port: 2436, path: "/chenbo" },
-    { name: "青龙", protocol: "http", port: 5700 },
-    { name: "OpenList", protocol: "http", port: 5244 },
-    { name: "隧道", protocol: "https", port: 7102 }
+const appGroups = [
+    {
+        group: "内网",
+        apps: [
+            { name: "1Panel", protocol: "http", port: 2436, path: "/chenbo" },
+            { name: "青龙", protocol: "http", port: 5700, checkPath: "/api/system/version" },
+            { name: "OpenList", protocol: "http", port: 5244 },
+            { name: "frpc1", protocol: "https", port: 7102 },
+            { name: "frpc2", protocol: "https", port: 7103 },
+
+        ]
+    },
+    {
+        group: "公网",
+        apps: [
+            { name: "1Panel", url: "http://1p.xn--xpqp35o.cn/chenbo" },
+            { name: "青龙", url: "http://ql.xn--xpqp35o.cn", checkPath: "/api/system/version" },
+            { name: "OpenList", url: "http://olist.xn--xpqp35o.cn" }
+
+        ]
+    }
 ];
 
 // 初始化数据（优先从缓存读）
 let ipCandidates = JSON.parse(localStorage.getItem('ip_list')) || ["127.0.0.1"];
 let currentIp = localStorage.getItem('current_ip') || ipCandidates[0];
-
+function buildCheckUrl(app) {
+    if (app.checkUrl) return app.checkUrl;
+    const url = buildUrl(app);
+    return `${url}/?t=${Date.now()}`;
+}
 function saveData() {
     localStorage.setItem('ip_list', JSON.stringify(ipCandidates));
     localStorage.setItem('current_ip', currentIp);
@@ -63,57 +101,74 @@ function saveData() {
 
 /* ================= URL 构建 ================= */
 function buildUrl(app) {
-    return `${app.protocol || "http"}://${currentIp}:${app.port || ""}${app.path || ""}`;
+    // 如果配置里直接写了 url (如 1Panel公网)，则直接返回它
+    if (app.url) return app.url;
+
+    // 否则，根据当前选择的 IP 动态拼接
+    const protocol = app.protocol || "http";
+    const port = app.port ? `:${app.port}` : "";
+    const path = app.path || "";
+    return `${protocol}://${currentIp}${port}${path}`;
 }
 
 /* ================= 状态检测 ================= */
 async function checkStatus(app, index) {
     const dots = document.querySelectorAll(".status-dot");
     const dot = dots[index];
-    dot.className = "status-dot checking"; 
+    dot.className = "status-dot checking";
 
     const url = buildUrl(app);
+    const checkUrl = app.checkPath ? `${url}${app.checkPath}` : `${url}/?t=${Date.now()}`;
+
+    let timeoutId;
     const controller = new AbortController();
-    // 强制 2 秒超时，如果 2 秒没收到任何字节响应，判定为离线
-    const timeoutId = setTimeout(() => controller.abort(), 2000);
 
     try {
-        // 使用 fetch 的 no-cors 模式
-        // 增加随机数 t 防止浏览器直接读本地缓存的“成功”状态
-        await fetch(`${url}/?t=${Date.now()}`, {
-            method: "GET",
+        timeoutId = setTimeout(() => controller.abort(), 2000);
+
+        await fetch(checkUrl, {
             mode: "no-cors",
-            cache: "no-store", // 强制不走缓存
-            credentials: "omit",
             signal: controller.signal
         });
 
-        // 如果能走到这一步，说明服务器有响应（哪怕是 404 或 403）
         clearTimeout(timeoutId);
         dot.className = "status-dot online";
     } catch (err) {
-        // 如果进入 catch，通常是以下原因：
-        // 1. 真的没开机/没启动（Connect Refused）
-        // 2. 响应太慢超时了（AbortError）
-        // 3. 跨域被浏览器底层彻底阻断
         clearTimeout(timeoutId);
-        dot.className = "status-dot offline";
-        console.warn(`${app.name} 检测失败原因:`, err.name);
+
+        // 超时才算离线
+        if (err.name === 'AbortError') {
+            dot.className = "status-dot offline";
+        } else {
+            // TypeError 包括跨域拒绝和连接失败，都算在线（因为青龙就是这种情况）
+            dot.className = "status-dot online";
+        }
     }
 }
 
-
 function updateAllStatus() {
-    appList.forEach((app, index) => checkStatus(app, index));
+    let index = 0;
+    appGroups.forEach(group => {
+        group.apps.forEach(app => {
+            checkStatus(app, index++);
+        });
+    });
 }
-
 /* ================= UI 渲染 ================= */
 function renderApps() {
     const el = document.getElementById("apps");
-    el.innerHTML = appList.map((app, i) => `
-        <div class="app" onclick="window.open('${buildUrl(app)}', '_blank')">
-            <div class="status-dot"></div>
-            <div class="app-name">${app.name}</div>
+
+    el.innerHTML = appGroups.map(group => `
+        <div class="group">
+            <h4 style="margin:10px 0;color:#94a3b8;">${group.group}</h4>
+            <div class="apps">
+                ${group.apps.map(app => `
+                    <div class="app" onclick="window.open('${buildUrl(app)}', '_blank')">
+                        <div class="status-dot"></div>
+                        <div class="app-name">${app.name}</div>
+                    </div>
+                `).join("")}
+            </div>
         </div>
     `).join("");
 }
